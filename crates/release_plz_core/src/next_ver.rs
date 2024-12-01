@@ -92,7 +92,7 @@ pub struct UpdateRequest {
 }
 
 #[derive(Debug, Clone, Default)]
-struct PackagesConfig {
+pub struct PackagesConfig {
     /// Config for packages that don't have a specific configuration.
     default: UpdateConfig,
     /// Configurations that override `default`.
@@ -111,7 +111,7 @@ impl From<UpdateConfig> for PackageUpdateConfig {
 }
 
 impl PackagesConfig {
-    fn get(&self, package_name: &str) -> PackageUpdateConfig {
+    pub fn get(&self, package_name: &str) -> PackageUpdateConfig {
         self.overrides
             .get(package_name)
             .cloned()
@@ -139,6 +139,9 @@ pub struct UpdateConfig {
     /// Whether to create/update changelog or not.
     /// Default: `true`.
     pub changelog_update: bool,
+    /// Whether to use git tags instead of the Cargo registry to determine package versions.
+    /// Default: `false`.
+    pub git_only: bool,
     /// High-level toggle to process this package or ignore it.
     pub release: bool,
     /// - If `true`, feature commits will always bump the minor version, even in 0.x releases.
@@ -167,6 +170,10 @@ impl PackageUpdateConfig {
     pub fn should_update_changelog(&self) -> bool {
         self.generic.changelog_update
     }
+
+    pub fn git_only(&self) -> bool {
+        self.generic.git_only
+    }
 }
 
 impl Default for UpdateConfig {
@@ -174,6 +181,7 @@ impl Default for UpdateConfig {
         Self {
             semver_check: true,
             changelog_update: true,
+            git_only: false,
             release: true,
             features_always_increment_minor: false,
             tag_name_template: None,
@@ -210,6 +218,10 @@ impl UpdateConfig {
     pub fn version_updater(&self) -> VersionUpdater {
         VersionUpdater::default()
             .with_features_always_increment_minor(self.features_always_increment_minor)
+    }
+
+    pub fn with_git_only(self, git_only: bool) -> Self {
+        Self { git_only, ..self }
     }
 }
 
@@ -406,12 +418,17 @@ pub async fn next_versions(input: &UpdateRequest) -> anyhow::Result<(PackagesUpd
         project: &local_project,
         req: input,
     };
+
     // Retrieve the latest published version of the packages.
     // Release-plz will compare the registry packages with the local packages,
     // to determine the new commits.
-    let registry_packages = registry_packages::get_registry_packages(
+    let mut registry_packages = registry_packages::get_registry_packages(
         input.registry_manifest.as_deref(),
-        &local_project.publishable_packages(),
+        &local_project
+            .publishable_packages()
+            .into_iter()
+            .filter(|p| !input.packages_config.get(&p.name).git_only())
+            .collect::<Vec<_>>(),
         input.registry.as_deref(),
     )?;
 
@@ -421,6 +438,90 @@ pub async fn next_versions(input: &UpdateRequest) -> anyhow::Result<(PackagesUpd
     if !input.allow_dirty {
         repository.repo.is_clean()?;
     }
+
+    // Extend the packages by the `git_only` packages.
+    let tags = repository
+        .repo
+        .get_tags_version_sorted(false)
+        .unwrap_or(Vec::new());
+
+    // TODO(PigeonF): Is there some way to not always create this?
+    let tempdir = registry_packages
+        ._temp_dir
+        .get_or_insert(tempfile::tempdir().context("failed to get a temporary directory")?);
+
+    for package in local_project
+        .workspace_packages()
+        .into_iter()
+        .filter(|p| input.packages_config.get(&p.name).git_only())
+    {
+        let packages_config = input.packages_config.get(&package.name);
+        // We cannot search for matching tags if there is no tag name template
+
+        // TODO(PigeonF): There should be some part of the code that sets this to a fallback value
+        // according to the [docs](https://release-plz.ieni.dev/docs/config#the-git_tag_name-field)?
+        let Some(template) = packages_config.generic.tag_name_template else {
+            debug!(
+                package = package.name,
+                "skipping git only package because of missing tag name template",
+            );
+            continue;
+        };
+
+        // Convert the tag name template to a regular expression to find matching tags.
+
+        // XXX: Regex created with user input
+        let context = crate::tera::tera_context(&package.name, ".+?");
+        let regex = crate::tera::render_template(&template, &context, "tag_name");
+        let Ok(regex) = regex::Regex::new(&regex) else {
+            warn!(
+                package = package.name,
+                template = template,
+                "unable to create tag regex from tag name template"
+            );
+            continue;
+        };
+
+        // Find the latest tag for the package
+        let Some(tag) = tags.iter().filter(|t| regex.is_match(t)).last() else {
+            debug!(
+                package = package.name,
+                template = template,
+                "no matching tag found for git only package"
+            );
+            continue;
+        };
+
+        // Add a git worktree for the package
+        let path = tempdir.path().join(&package.name);
+        repository.repo.add_worktree(&path, &tag)?;
+
+        // Because we checked out a repository, we have to select the correct package in case the
+        // Cargo.toml defines a workspace.
+        let manifest_path = path.join(CARGO_TOML);
+        let metadata = cargo_metadata::MetadataCommand::new()
+            .no_deps()
+            .manifest_path(manifest_path)
+            .exec()
+            .context("failed to execute cargo_metadata")?;
+        let package = metadata
+            .packages
+            .into_iter()
+            .filter(|p| p.name == package.name)
+            .next()
+            .ok_or_else(|| {
+                anyhow::anyhow!("cannot retrieve package {} at {:?}", package.name, path)
+            })?;
+
+        registry_packages.packages.insert(
+            package.name.clone(),
+            RegistryPackage {
+                package,
+                sha1: repository.repo.get_tag_commit(tag),
+            },
+        );
+    }
+
     let packages_to_update = updater
         .packages_to_update(&registry_packages, &repository.repo, input.local_manifest())
         .await?;
