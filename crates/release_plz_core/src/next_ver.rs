@@ -429,11 +429,9 @@ pub async fn next_versions(input: &UpdateRequest) -> anyhow::Result<(PackagesUpd
     // Retrieve the latest published version of the packages.
     // Release-plz will compare the registry packages with the local packages,
     // to determine the new commits.
-    let publishable_packages = local_project.publishable_packages();
-
-    let registry_published_packages = publishable_packages
-        .iter()
-        .copied()
+    let registry_published_packages = local_project
+        .publishable_packages()
+        .into_iter()
         .filter(|p| !input.packages_config.get(&p.name).git_only());
 
     let git_only_published_packages = local_project
@@ -451,7 +449,12 @@ pub async fn next_versions(input: &UpdateRequest) -> anyhow::Result<(PackagesUpd
     )?;
 
     let packages_to_update = updater
-        .packages_to_update(&registry_packages, &repository.repo, input.local_manifest())
+        .packages_to_update(
+            &registry_packages,
+            &repository.repo,
+            input.local_manifest(),
+            &input.packages_config,
+        )
         .await?;
     Ok((packages_to_update, repository))
 }
@@ -505,11 +508,12 @@ impl Updater<'_> {
         registry_packages: &PackagesCollection,
         repository: &Repo,
         local_manifest_path: &Utf8Path,
+        packages_config: &PackagesConfig,
     ) -> anyhow::Result<PackagesUpdate> {
         debug!("calculating local packages");
 
         let packages_diffs = self
-            .get_packages_diffs(registry_packages, repository)
+            .get_packages_diffs(registry_packages, repository, packages_config)
             .await?;
         let version_groups = self.get_version_groups(&packages_diffs);
         debug!("version groups: {:?}", version_groups);
@@ -650,13 +654,15 @@ impl Updater<'_> {
         &self,
         registry_packages: &PackagesCollection,
         repository: &Repo,
+        packages_config: &PackagesConfig,
     ) -> anyhow::Result<Vec<(&Package, Diff)>> {
         // Store diff for each package. This operation is not thread safe, so we do it in one
         // package at a time.
         let packages_diffs_res: anyhow::Result<Vec<(&Package, Diff)>> = self
             .project
-            .publishable_packages()
+            .workspace_packages()
             .iter()
+            .filter(|p| p.is_publishable() || packages_config.get(&p.name).git_only())
             .map(|&p| {
                 let diff = self
                     .get_diff(p, registry_packages, repository)
