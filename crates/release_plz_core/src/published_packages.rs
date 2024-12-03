@@ -161,11 +161,12 @@ impl PackagesCollection {
 
             repo.add_worktree(&package_store_dir, release_tag)?;
 
-            let metadata =
-                cargo_utils::get_manifest_metadata(&repo.directory().join(cargo_utils::CARGO_TOML))
-                    .with_context(|| {
-                        format!("failed to get root manifest metadata at tag '{release_tag}'")
-                    })?;
+            let manifest = cargo_metadata::camino::Utf8PathBuf::try_from(
+                package_store_dir.join(cargo_utils::CARGO_TOML),
+            )?;
+            let metadata = cargo_utils::get_manifest_metadata(&manifest).with_context(|| {
+                format!("failed to get root manifest metadata at tag '{release_tag}'")
+            })?;
 
             let published_package = metadata
                 .packages
@@ -181,7 +182,7 @@ impl PackagesCollection {
 
             self.push(PublishedPackage {
                 package: published_package,
-                sha1: Some(repo.current_commit_hash()?),
+                sha1: repo.get_tag_commit(release_tag),
             });
         }
 
@@ -205,9 +206,6 @@ pub fn get_latest_packages<'p>(
     collection.get_registry_packages(registry_manifest, registry_packages, registry)?;
 
     collection.get_latest_tagged_packages(project, repo, git_only_packages.into_iter())?;
-
-    // Restore the repo to its original state
-    repo.checkout_head()?;
 
     Ok(collection)
 }
