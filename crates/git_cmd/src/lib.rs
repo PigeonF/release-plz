@@ -237,6 +237,7 @@ impl Repo {
     }
 
     /// Adds a detached git worktree at the given path checked out at the given object.
+    #[instrument(skip(self))]
     pub fn add_worktree(&self, path: &Path, object: &str) -> anyhow::Result<()> {
         self.git(&[
             "worktree",
