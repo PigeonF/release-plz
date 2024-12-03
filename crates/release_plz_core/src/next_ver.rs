@@ -436,9 +436,9 @@ pub async fn next_versions(input: &UpdateRequest) -> anyhow::Result<(PackagesUpd
         .copied()
         .filter(|p| !input.packages_config.get(&p.name).git_only());
 
-    let git_only_published_packages = publishable_packages
-        .iter()
-        .copied()
+    let git_only_published_packages = local_project
+        .workspace_packages()
+        .into_iter()
         .filter(|p| input.packages_config.get(&p.name).git_only());
 
     let registry_packages = published_packages::get_latest_packages(
