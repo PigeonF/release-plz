@@ -148,7 +148,13 @@ impl ReleaseRequest {
 
     fn is_publish_enabled(&self, package: &str) -> bool {
         let config = self.get_package_config(package);
-        config.publish.enabled
+        config.publish.is_enabled()
+    }
+
+    fn publish_to_registry(&self, package: &str) -> bool {
+        self.get_package_config(package)
+            .publish
+            .publish_to_registry()
     }
 
     fn is_git_release_enabled(&self, package: &str) -> bool {
@@ -337,8 +343,9 @@ impl Default for ReleaseConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PublishConfig {
-    enabled: bool,
+pub enum PublishConfig {
+    Enabled(bool),
+    GitOnly(bool),
 }
 
 impl Default for PublishConfig {
@@ -348,12 +355,33 @@ impl Default for PublishConfig {
 }
 
 impl PublishConfig {
-    pub fn enabled(enabled: bool) -> Self {
-        Self { enabled }
+    pub fn from(registry: bool, git_only: bool) -> Self {
+        if git_only {
+            Self::git_only(true)
+        } else {
+            Self::enabled(registry)
+        }
     }
 
+    pub fn enabled(enabled: bool) -> Self {
+        Self::Enabled(enabled)
+    }
+
+    pub fn git_only(enabled: bool) -> Self {
+        Self::GitOnly(enabled)
+    }
+
+    /// Whether the package should be published in general.
     pub fn is_enabled(&self) -> bool {
-        self.enabled
+        match self {
+            PublishConfig::Enabled(b) => *b,
+            PublishConfig::GitOnly(b) => *b,
+        }
+    }
+
+    /// Whether to publish the package to a registry.
+    pub fn publish_to_registry(&self) -> bool {
+        *self == PublishConfig::Enabled(true)
     }
 }
 
@@ -531,7 +559,11 @@ async fn release_packages(
     repo: &Repo,
     git_client: &GitClient,
 ) -> anyhow::Result<Option<Release>> {
-    let packages = project.publishable_packages();
+    let packages = project
+        .workspace_packages()
+        .into_iter()
+        .filter(|p| input.is_publish_enabled(&p.name))
+        .collect::<Vec<_>>();
     let release_order = release_order(&packages).context("cannot determine release order")?;
     let mut package_releases: Vec<PackageRelease> = vec![];
     for package in release_order {
@@ -722,8 +754,8 @@ async fn release_package(
 ) -> anyhow::Result<bool> {
     let workspace_root = &input.metadata.workspace_root;
 
-    let publish = input.is_publish_enabled(&release_info.package.name);
-    if publish {
+    let publish_to_registry = input.publish_to_registry(&release_info.package.name);
+    if publish_to_registry {
         let output = run_cargo_publish(release_info.package, input, workspace_root)
             .context("failed to run cargo publish")?;
         if !output.status.success()
@@ -745,7 +777,7 @@ async fn release_package(
         );
         Ok(false)
     } else {
-        if publish {
+        if publish_to_registry {
             wait_until_published(index, release_info.package, input.publish_timeout, token).await?;
         }
 

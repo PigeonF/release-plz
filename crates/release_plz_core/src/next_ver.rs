@@ -430,9 +430,9 @@ pub async fn next_versions(input: &UpdateRequest) -> anyhow::Result<(PackagesUpd
     // Release-plz will compare the registry packages with the local packages,
     // to determine the new commits.
     let registry_published_packages = local_project
-        .publishable_packages()
+        .workspace_packages()
         .into_iter()
-        .filter(|p| !input.packages_config.get(&p.name).git_only());
+        .filter(|p| p.is_publishable() && !input.packages_config.get(&p.name).git_only());
 
     let git_only_published_packages = local_project
         .workspace_packages()

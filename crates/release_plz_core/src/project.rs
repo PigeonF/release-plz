@@ -94,13 +94,6 @@ impl Project {
         &self.root
     }
 
-    pub fn publishable_packages(&self) -> Vec<&Package> {
-        self.packages
-            .iter()
-            .filter(|p| p.is_publishable())
-            .collect()
-    }
-
     /// Get all packages, including non-publishable.
     pub fn workspace_packages(&self) -> Vec<&Package> {
         self.packages.iter().collect()
@@ -165,7 +158,11 @@ impl Project {
         let mut missing_fields = Vec::new();
         let mut missing_version_errors = Vec::new();
 
-        for package in &self.publishable_packages() {
+        for package in self
+            .workspace_packages()
+            .into_iter()
+            .filter(|p| p.is_publishable())
+        {
             if package.license.is_none() {
                 missing_fields.push(format!("- `license` for package `{}`", package.name));
             }

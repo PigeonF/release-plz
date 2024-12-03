@@ -210,12 +210,14 @@ pub struct PackageSpecificConfigWithName {
 
 impl From<PackageConfig> for release_plz_core::ReleaseConfig {
     fn from(value: PackageConfig) -> Self {
-        let is_publish_enabled = value.publish != Some(false);
         let is_git_tag_enabled = value.git_tag_enable != Some(false);
         let git_tag_name = value.git_tag_name.clone();
         let release = value.release != Some(false);
         let mut cfg = Self::default()
-            .with_publish(release_plz_core::PublishConfig::enabled(is_publish_enabled))
+            .with_publish(release_plz_core::PublishConfig::from(
+                value.publish != Some(false),
+                value.git_only == Some(true),
+            ))
             .with_git_release(git_release(&value))
             .with_git_tag(
                 release_plz_core::GitTagConfig::enabled(is_git_tag_enabled)
